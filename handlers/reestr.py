@@ -42,9 +42,12 @@ def _get_session(user_id: int) -> dict:
     return sessions[user_id]
 
 
-def _validate_vehicle(v: str) -> bool:
-    """Проверяет формат номера ТС (буквы+цифры, 6-10 символов)."""
-    return bool(re.match(r'^[A-Za-z0-9]{6,10}$', v))
+# Строка вида 14.04.26 / 14/04/2026 / 14-04-26 — чтобы дать понятную ошибку, а не общую
+_DATE_LIKE_RE = re.compile(r'^\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}$')
+# Номер ТС: только буквы A-Z и цифры, длиной 6-10 символов
+_VEHICLE_RE = re.compile(r'^[A-Z0-9]{6,10}$')
+
+_FORMAT_HINT = "Формат: `СФ ТС`\nПример: `746 80D830RA`"
 
 
 def _parse_text_input(text: str) -> tuple[list[UPDRecord], list[str]]:
@@ -55,6 +58,7 @@ def _parse_text_input(text: str) -> tuple[list[UPDRecord], list[str]]:
 
     СФ = номер счёт-фактуры (= номер акта). Бот сверяет с CRM.
     Возвращает (записи, ошибки).
+    Строки с невалидным форматом в записи НЕ попадают — только в ошибки.
     """
     records = []
     errors = []
@@ -64,7 +68,7 @@ def _parse_text_input(text: str) -> tuple[list[UPDRecord], list[str]]:
             continue
         parts = line.split()
         if len(parts) < 2:
-            errors.append(f"❌ `{line}` — нужно минимум 2 поля (СФ ТС)")
+            errors.append(f"❌ `{line}` — нужно 2 поля: СФ и номер ТС")
             continue
         try:
             sf_num = int(parts[0])
@@ -73,8 +77,12 @@ def _parse_text_input(text: str) -> tuple[list[UPDRecord], list[str]]:
             continue
 
         vehicle = parts[1].upper()
-        if not _validate_vehicle(vehicle):
-            errors.append(f"⚠️ `{vehicle}` — подозрительный формат ТС")
+        if _DATE_LIKE_RE.match(vehicle):
+            errors.append(f"❌ `{parts[1]}` похоже на дату — нужен номер ТС (пример: `80D830RA`)")
+            continue
+        if not _VEHICLE_RE.match(vehicle):
+            errors.append(f"❌ `{parts[1]}` — неверный номер ТС (только буквы/цифры, 6–10 символов; пример: `80D830RA`)")
+            continue
 
         records.append(UPDRecord(
             upd_number=sf_num,
@@ -148,13 +156,17 @@ async def handle_text(message: Message, state: FSMContext):
     session = _get_session(message.from_user.id)
     records, errors = _parse_text_input(message.text)
 
-    if not records and not errors:
-        await message.answer(
-            "⚠️ Не удалось распознать. Формат:\n"
-            "`СФ  ТС`\n"
-            "Например: `746 80D830RA`",
-            parse_mode="Markdown",
-        )
+    if not records:
+        if errors:
+            await message.answer(
+                "\n".join(errors) + f"\n\n{_FORMAT_HINT}",
+                parse_mode="Markdown",
+            )
+        else:
+            await message.answer(
+                f"⚠️ Не удалось распознать.\n\n{_FORMAT_HINT}",
+                parse_mode="Markdown",
+            )
         return
 
     # Проверка дублей
